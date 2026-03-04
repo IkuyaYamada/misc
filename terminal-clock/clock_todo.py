@@ -42,6 +42,12 @@ import sys
 import os
 import re
 from datetime import datetime, timedelta, date as date_type
+from particles import init_colors as _particle_init_colors, make_particles
+from snow import init_colors as _snow_init_colors, make_snow, make_rain
+from orbit import init_colors as _orbit_init_colors, make_orbits
+from plasma import init_colors as _plasma_init_colors, make_plasma
+
+_FRAME_INTERVAL = 0.06   # 全エフェクト共通フレーム間隔
 
 # ===== 調整項目 =====
 MAX_UNDONE = 10
@@ -166,22 +172,31 @@ def compute_block_top(h, block_height):
     top = (usable_h - block_height) // 2 + CENTER_BIAS_LINES
     return max(0, top)
 
-def draw_screen(stdscr, path, undone, done, col, row):
+def draw_screen(stdscr, path, undone, done, col, row, clock_only=False, items=None):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
+
+    if items:
+        for item in items:
+            item.draw(stdscr)
+
 
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d (%a)")
     time_str = now.strftime("%H:%M:%S")
     big = render_big(time_str)
 
-    # ===== レイアウト高さ定義 =====
-    # 日付1 + 空行1 + 時計5 + 空行2
-    # + 見出し1 + 空行1 + MAX_UNDONE
-    # + 空行1 + 見出し1 + 空行1 + MAX_DONE
-    block_height = (1 + 1 + len(big) + 2
-                    + 1 + 1 + MAX_UNDONE
-                    + 1 + 1 + 1 + MAX_DONE)
+    if clock_only:
+        # 日付1 + 空行1 + 時計5
+        block_height = 1 + 1 + len(big)
+    else:
+        # ===== レイアウト高さ定義 =====
+        # 日付1 + 空行1 + 時計5 + 空行2
+        # + 見出し1 + 空行1 + MAX_UNDONE
+        # + 空行1 + 見出し1 + 空行1 + MAX_DONE
+        block_height = (1 + 1 + len(big) + 2
+                        + 1 + 1 + MAX_UNDONE
+                        + 1 + 1 + 1 + MAX_DONE)
 
     top = compute_block_top(h, block_height)
 
@@ -193,48 +208,52 @@ def draw_screen(stdscr, path, undone, done, col, row):
     for i, line in enumerate(big):
         safe_addstr(stdscr, clock_y + i, (w - len(line)) // 2, line, curses.A_BOLD)
 
-    def fmt(t):
-        return f"{t[2]}  {t[1]}" if t[2] else t[1]
+    if not clock_only:
+        def fmt(t):
+            return f"{t[2]}  {t[1]}" if t[2] else t[1]
 
-    all_lines = [fmt(t) for t in undone + done]
-    content_width = max((len(s) for s in all_lines), default=len("[ ] Undone"))
-    content_width = max(content_width, len("[ ] Undone"))
-    content_width = min(content_width, w - 4)
-    content_x = max(2, (w - content_width) // 2)
-    text_width = content_width
+        all_lines = [fmt(t) for t in undone + done]
+        content_width = max((len(s) for s in all_lines), default=len("[ ] Undone"))
+        content_width = max(content_width, len("[ ] Undone"))
+        content_width = min(content_width, w - 4)
+        content_x = max(2, (w - content_width) // 2)
+        text_width = content_width
 
-    # Undone セクション
-    undone_title_y = clock_y + len(big) + 2
-    safe_addstr(stdscr, undone_title_y, content_x, "[ ] Undone", curses.A_UNDERLINE)
+        # Undone セクション
+        undone_title_y = clock_y + len(big) + 2
+        safe_addstr(stdscr, undone_title_y, content_x, "[ ] Undone", curses.A_UNDERLINE)
 
-    undone_y0 = undone_title_y + 2
-    for i in range(MAX_UNDONE):
-        y = undone_y0 + i
-        if y >= h - 1:
-            break
-        if i < len(undone):
-            attr = curses.A_REVERSE if col == 0 and row == i else curses.A_NORMAL
-            safe_addstr(stdscr, y, content_x, fmt(undone[i])[:text_width], attr)
+        undone_y0 = undone_title_y + 2
+        for i in range(MAX_UNDONE):
+            y = undone_y0 + i
+            if y >= h - 1:
+                break
+            if i < len(undone):
+                attr = curses.A_REVERSE if col == 0 and row == i else curses.A_NORMAL
+                safe_addstr(stdscr, y, content_x, fmt(undone[i])[:text_width], attr)
 
-    # Done セクション
-    done_title_y = undone_y0 + MAX_UNDONE + 1
-    safe_addstr(stdscr, done_title_y, content_x, "[x] Done", curses.A_UNDERLINE | curses.A_DIM)
+        # Done セクション
+        done_title_y = undone_y0 + MAX_UNDONE + 1
+        safe_addstr(stdscr, done_title_y, content_x, "[x] Done", curses.A_UNDERLINE | curses.A_DIM)
 
-    done_y0 = done_title_y + 2
-    for i in range(MAX_DONE):
-        y = done_y0 + i
-        if y >= h - 1:
-            break
-        if i < len(done):
-            attr = curses.A_REVERSE if col == 1 and row == i else curses.A_DIM
-            safe_addstr(stdscr, y, content_x, fmt(done[i])[:text_width], attr)
+        done_y0 = done_title_y + 2
+        for i in range(MAX_DONE):
+            y = done_y0 + i
+            if y >= h - 1:
+                break
+            if i < len(done):
+                attr = curses.A_REVERSE if col == 1 and row == i else curses.A_DIM
+                safe_addstr(stdscr, y, content_x, fmt(done[i])[:text_width], attr)
 
-    footer = "jk/up-down:move  hl/left-right:section  Enter:toggle  q:quit"
+        footer = "jk/up-down:move  hl/left-right:section  Enter:toggle  q:quit"
+    else:
+        footer = "q:quit"
     safe_addstr(stdscr, h - 1, (w - len(footer)) // 2, footer, curses.A_DIM)
 
     stdscr.refresh()
 
-def main_loop(stdscr, path):
+def main_loop(stdscr, path, clock_only=False, particle_count=0,
+              snow_count=0, rain_count=0, use_orbit=False, use_plasma=False):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
@@ -243,29 +262,64 @@ def main_loop(stdscr, path):
     col = 0
     row = 0
 
-    undone, done = read_tasks(path)
+    undone, done = ([], []) if clock_only else read_tasks(path)
+
+    h, w = stdscr.getmaxyx()
+    items: list = []
+    if particle_count > 0:
+        _particle_init_colors()
+        items += make_particles(h, w, particle_count)
+    if snow_count > 0:
+        _snow_init_colors()
+        items += make_snow(h, w, snow_count)
+    if rain_count > 0:
+        _snow_init_colors()
+        items += make_rain(h, w, rain_count)
+    if use_orbit:
+        _orbit_init_colors()
+        items += make_orbits(h, w, cy_bias=CENTER_BIAS_LINES)
+    if use_plasma:
+        _plasma_init_colors()
+        items += make_plasma()
 
     last_sec = None
-    next_poll = 0
-    last_mtime = os.path.getmtime(path) if os.path.exists(path) else None
+    next_poll = 0.0
+    next_frame = 0.0
+    last_mtime = os.path.getmtime(path) if (not clock_only and os.path.exists(path)) else None
 
-    draw_screen(stdscr, path, undone, done, col, row)
+    draw_screen(stdscr, path, undone, done, col, row, clock_only, items or None)
 
     while True:
         now = datetime.now()
+        t = time.time()
+        need_redraw = False
+
+        # 毎秒：時計更新
         if now.second != last_sec:
             last_sec = now.second
-            draw_screen(stdscr, path, undone, done, col, row)
+            need_redraw = True
 
-        if time.time() > next_poll:
-            next_poll = time.time() + FILE_POLL_SEC
+        # フレーム毎：エフェクト更新
+        if items and t >= next_frame:
+            next_frame = t + _FRAME_INTERVAL
+            h, w = stdscr.getmaxyx()
+            for item in items:
+                item.update(h, w)
+            need_redraw = True
+
+        # TODOファイルポーリング
+        if not clock_only and t > next_poll:
+            next_poll = t + FILE_POLL_SEC
             if os.path.exists(path):
                 m = os.path.getmtime(path)
                 if m != last_mtime:
                     last_mtime = m
                     undone, done = read_tasks(path)
                     row = 0
-                    draw_screen(stdscr, path, undone, done, col, row)
+                    need_redraw = True
+
+        if need_redraw:
+            draw_screen(stdscr, path, undone, done, col, row, clock_only, items or None)
 
         ch = stdscr.getch()
         if ch == -1:
@@ -274,21 +328,20 @@ def main_loop(stdscr, path):
         if ch in (ord("q"), ord("Q")):
             break
 
+        if clock_only:
+            continue
+
         if ch in (curses.KEY_UP, ord("k")):
             row = max(0, row - 1)
-
         elif ch in (curses.KEY_DOWN, ord("j")):
             current = undone if col == 0 else done
             row = min(max(0, len(current) - 1), row + 1) if current else 0
-
         elif ch in (curses.KEY_LEFT, ord("h")):
             col = 0
             row = clamp(row, 0, len(undone) - 1)
-
         elif ch in (curses.KEY_RIGHT, ord("l")):
             col = 1
             row = clamp(row, 0, len(done) - 1)
-
         elif ch in (10, 13):
             target = undone if col == 0 else done
             if row < len(target):
@@ -296,7 +349,7 @@ def main_loop(stdscr, path):
                 undone, done = read_tasks(path)
                 row = 0
 
-        draw_screen(stdscr, path, undone, done, col, row)
+        draw_screen(stdscr, path, undone, done, col, row, clock_only, items or None)
 
 def main():
     global FILTER_DAYS
@@ -304,9 +357,30 @@ def main():
     parser.add_argument("path", nargs="?", default="./todo.txt")
     parser.add_argument("--days", "-d", type=int, default=FILTER_DAYS,
                         metavar="N", help="直近N日以内のタスクのみ表示 (0=無制限)")
+    parser.add_argument("--clock-only", "-c", action="store_true",
+                        help="時計のみ表示（TODO非表示）")
+    parser.add_argument("--particles", "-p", nargs="?", const=30, type=int,
+                        metavar="N", help="パーティクル表示 (デフォルト30個)")
+    parser.add_argument("--snow", "-s", nargs="?", const=40, type=int,
+                        metavar="N", help="雪エフェクト (デフォルト40個)")
+    parser.add_argument("--rain", "-r", nargs="?", const=60, type=int,
+                        metavar="N", help="雨エフェクト (デフォルト60個)")
+    parser.add_argument("--orbit", "-o", action="store_true",
+                        help="軌道エフェクト（時計周囲を記号が周回）")
+    parser.add_argument("--plasma", action="store_true",
+                        help="プラズマ波エフェクト（背景に波紋）")
     args = parser.parse_args()
     FILTER_DAYS = args.days
-    curses.wrapper(main_loop, args.path)
+    curses.wrapper(
+        main_loop,
+        args.path,
+        args.clock_only,
+        args.particles or 0,
+        args.snow or 0,
+        args.rain or 0,
+        args.orbit,
+        args.plasma,
+    )
 
 if __name__ == "__main__":
     main()
