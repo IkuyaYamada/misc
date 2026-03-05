@@ -33,7 +33,7 @@ def init_colors() -> None:
     except Exception:
         bg = curses.COLOR_BLACK
 
-    curses.init_pair(_SNOW_PAIR, curses.COLOR_WHITE, bg)
+    curses.init_pair(_SNOW_PAIR, curses.COLOR_BLUE, bg)
     curses.init_pair(_RAIN_PAIR, curses.COLOR_CYAN, bg)
     _color_attrs_snow = [
         curses.color_pair(_SNOW_PAIR) | curses.A_DIM,

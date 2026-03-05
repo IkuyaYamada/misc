@@ -46,12 +46,12 @@ from particles import init_colors as _particle_init_colors, make_particles
 from snow import init_colors as _snow_init_colors, make_snow, make_rain
 from orbit import init_colors as _orbit_init_colors, make_orbits
 from plasma import init_colors as _plasma_init_colors, make_plasma
+from city import init_colors as _city_init_colors, make_city
 
 _FRAME_INTERVAL = 0.06   # 全エフェクト共通フレーム間隔
 
 # ===== 調整項目 =====
-MAX_UNDONE = 10
-MAX_DONE = 3
+MAX_BLOCK_TASKS = 15   # 1ブロック内の最大表示タスク数
 FILTER_DAYS = 0
 CENTER_BIAS_LINES = -2
 FILE_POLL_SEC = 2.0
@@ -82,53 +82,39 @@ def render_big(text):
             rows[i] += pattern[i] + "  "
     return rows
 
-def read_tasks(path):
+def read_blocks(path):
+    """日付ブロック単位でタスクを読み込む。新しい順に返す。
+    戻り値: [(date_str, [(line_idx, raw_line), ...]), ...]
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception:
-        return [], []
+        return []
 
-    # 日付ヘッダーを先に全行分解決しておく
-    date_map = {}
-    current_date = ""
+    blocks = []
+    current_date = None
+    current_tasks = []
+
     for i, line in enumerate(lines):
         date_m = DATE_RE.match(line)
         if date_m:
+            if current_date is not None:
+                blocks.append((current_date, current_tasks[:]))
             current_date = date_m.group(1)
-        date_map[i] = current_date
+            current_tasks = []
+        elif line.strip():  # 空行以外はすべて拾う
+            current_tasks.append((i, line.rstrip("\n")))
 
-    cutoff = (date_type.today() - timedelta(days=FILTER_DAYS)) if FILTER_DAYS > 0 else None
+    if current_date is not None:
+        blocks.append((current_date, current_tasks[:]))
 
-    def within_range(date_str):
-        if cutoff is None or not date_str:
-            return True
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d").date() >= cutoff
-        except ValueError:
-            return True
+    if FILTER_DAYS > 0:
+        cutoff = (date_type.today() - timedelta(days=FILTER_DAYS)).strftime("%Y-%m-%d")
+        blocks = [(d, t) for d, t in blocks if not d or d >= cutoff]
 
-    # 末尾から走査して最新 MAX_* 件を収集し、最後に逆順にする
-    undone, done = [], []
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i]
-        m = TASK_RE.match(line)
-        if not m:
-            continue
-        if not within_range(date_map[i]):
-            continue
-        checkbox = m.group(2).lower()
-        entry = (i, line.rstrip("\n"), date_map[i])
-        if checkbox == "[ ]" and len(undone) < MAX_UNDONE:
-            undone.append(entry)
-        elif checkbox in ("[x]", "[X]") and len(done) < MAX_DONE:
-            done.append(entry)
-        if len(undone) >= MAX_UNDONE and len(done) >= MAX_DONE:
-            break
-
-    undone.reverse()
-    done.reverse()
-    return undone, done
+    blocks.sort(key=lambda b: b[0], reverse=True)
+    return blocks
 
 def toggle_task(path, line_index):
     with open(path, "r", encoding="utf-8") as f:
@@ -172,7 +158,14 @@ def compute_block_top(h, block_height):
     top = (usable_h - block_height) // 2 + CENTER_BIAS_LINES
     return max(0, top)
 
-def draw_screen(stdscr, path, undone, done, col, row, clock_only=False, items=None):
+def _task_display(raw):
+    m = TASK_RE.match(raw)
+    if m:
+        return f"{m.group(2)} {m.group(3).strip()}"
+    return raw.lstrip()
+
+
+def draw_screen(stdscr, path, blocks, block_idx, task_row, clock_only=False, items=None):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
 
@@ -180,23 +173,17 @@ def draw_screen(stdscr, path, undone, done, col, row, clock_only=False, items=No
         for item in items:
             item.draw(stdscr)
 
-
     now = datetime.now()
     date_str = now.strftime("%Y-%m-%d (%a)")
     time_str = now.strftime("%H:%M:%S")
     big = render_big(time_str)
 
     if clock_only:
-        # 日付1 + 空行1 + 時計5
         block_height = 1 + 1 + len(big)
     else:
-        # ===== レイアウト高さ定義 =====
-        # 日付1 + 空行1 + 時計5 + 空行2
-        # + 見出し1 + 空行1 + MAX_UNDONE
-        # + 空行1 + 見出し1 + 空行1 + MAX_DONE
-        block_height = (1 + 1 + len(big) + 2
-                        + 1 + 1 + MAX_UNDONE
-                        + 1 + 1 + 1 + MAX_DONE)
+        n_tasks = min(len(blocks[block_idx][1]), MAX_BLOCK_TASKS) if blocks else 0
+        # 日付1 + 空行1 + 時計5 + 空行2 + ヘッダー1 + 空行1 + タスク数
+        block_height = 1 + 1 + len(big) + 2 + 1 + 1 + n_tasks
 
     top = compute_block_top(h, block_height)
 
@@ -208,44 +195,38 @@ def draw_screen(stdscr, path, undone, done, col, row, clock_only=False, items=No
     for i, line in enumerate(big):
         safe_addstr(stdscr, clock_y + i, (w - len(line)) // 2, line, curses.A_BOLD)
 
-    if not clock_only:
-        def fmt(t):
-            return f"{t[2]}  {t[1]}" if t[2] else t[1]
+    if not clock_only and blocks:
+        blk_date, tasks = blocks[block_idx]
 
-        all_lines = [fmt(t) for t in undone + done]
-        content_width = max((len(s) for s in all_lines), default=len("[ ] Undone"))
-        content_width = max(content_width, len("[ ] Undone"))
+        content_width = max((len(raw.strip()) for _, raw in tasks), default=10)
+        content_width = max(content_width, len(blk_date) + 12)
         content_width = min(content_width, w - 4)
         content_x = max(2, (w - content_width) // 2)
-        text_width = content_width
 
-        # Undone セクション
-        undone_title_y = clock_y + len(big) + 2
-        safe_addstr(stdscr, undone_title_y, content_x, "[ ] Undone", curses.A_UNDERLINE)
+        # ブロックヘッダー（日付 + ナビ番号）
+        header_y = clock_y + len(big) + 2
+        nav = f"[{block_idx + 1}/{len(blocks)}]"
+        header = f"{blk_date or '(no date)'}  {nav}"
+        safe_addstr(stdscr, header_y, content_x, header, curses.A_UNDERLINE)
 
-        undone_y0 = undone_title_y + 2
-        for i in range(MAX_UNDONE):
-            y = undone_y0 + i
+        # 行一覧（タスク・テキスト混在）
+        task_y0 = header_y + 2
+        for i, (_, raw) in enumerate(tasks[:MAX_BLOCK_TASKS]):
+            y = task_y0 + i
             if y >= h - 1:
                 break
-            if i < len(undone):
-                attr = curses.A_REVERSE if col == 0 and row == i else curses.A_NORMAL
-                safe_addstr(stdscr, y, content_x, fmt(undone[i])[:text_width], attr)
+            m = TASK_RE.match(raw)
+            if m:
+                done = m.group(2).lower() == "[x]"
+                display = f"{m.group(2)} {m.group(3).strip()}"
+                base_attr = curses.A_DIM if done else curses.A_NORMAL
+            else:
+                display = raw.strip()
+                base_attr = curses.A_DIM
+            attr = (base_attr | curses.A_REVERSE) if i == task_row else base_attr
+            safe_addstr(stdscr, y, content_x, display[:content_width], attr)
 
-        # Done セクション
-        done_title_y = undone_y0 + MAX_UNDONE + 1
-        safe_addstr(stdscr, done_title_y, content_x, "[x] Done", curses.A_UNDERLINE | curses.A_DIM)
-
-        done_y0 = done_title_y + 2
-        for i in range(MAX_DONE):
-            y = done_y0 + i
-            if y >= h - 1:
-                break
-            if i < len(done):
-                attr = curses.A_REVERSE if col == 1 and row == i else curses.A_DIM
-                safe_addstr(stdscr, y, content_x, fmt(done[i])[:text_width], attr)
-
-        footer = "jk/up-down:move  hl/left-right:section  Enter:toggle  q:quit"
+        footer = "j/k:block  up/down:task  Enter:toggle  q:quit"
     else:
         footer = "q:quit"
     safe_addstr(stdscr, h - 1, (w - len(footer)) // 2, footer, curses.A_DIM)
@@ -253,16 +234,17 @@ def draw_screen(stdscr, path, undone, done, col, row, clock_only=False, items=No
     stdscr.refresh()
 
 def main_loop(stdscr, path, clock_only=False, particle_count=0,
-              snow_count=0, rain_count=0, use_orbit=False, use_plasma=False):
+              snow_count=0, rain_count=0, use_orbit=False, use_plasma=False,
+              use_city=False):
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
     stdscr.timeout(50)
 
-    col = 0
-    row = 0
+    block_idx = 0
+    task_row  = 0
 
-    undone, done = ([], []) if clock_only else read_tasks(path)
+    blocks = [] if clock_only else read_blocks(path)
 
     h, w = stdscr.getmaxyx()
     items: list = []
@@ -281,13 +263,16 @@ def main_loop(stdscr, path, clock_only=False, particle_count=0,
     if use_plasma:
         _plasma_init_colors()
         items += make_plasma()
+    if use_city:
+        _city_init_colors()
+        items += make_city(h, w)
 
     last_sec = None
     next_poll = 0.0
     next_frame = 0.0
     last_mtime = os.path.getmtime(path) if (not clock_only and os.path.exists(path)) else None
 
-    draw_screen(stdscr, path, undone, done, col, row, clock_only, items or None)
+    draw_screen(stdscr, path, blocks, block_idx, task_row, clock_only, items or None)
 
     while True:
         now = datetime.now()
@@ -314,12 +299,13 @@ def main_loop(stdscr, path, clock_only=False, particle_count=0,
                 m = os.path.getmtime(path)
                 if m != last_mtime:
                     last_mtime = m
-                    undone, done = read_tasks(path)
-                    row = 0
+                    blocks = read_blocks(path)
+                    block_idx = clamp(block_idx, 0, max(0, len(blocks) - 1))
+                    task_row = 0
                     need_redraw = True
 
         if need_redraw:
-            draw_screen(stdscr, path, undone, done, col, row, clock_only, items or None)
+            draw_screen(stdscr, path, blocks, block_idx, task_row, clock_only, items or None)
 
         ch = stdscr.getch()
         if ch == -1:
@@ -331,25 +317,30 @@ def main_loop(stdscr, path, clock_only=False, particle_count=0,
         if clock_only:
             continue
 
-        if ch in (curses.KEY_UP, ord("k")):
-            row = max(0, row - 1)
-        elif ch in (curses.KEY_DOWN, ord("j")):
-            current = undone if col == 0 else done
-            row = min(max(0, len(current) - 1), row + 1) if current else 0
-        elif ch in (curses.KEY_LEFT, ord("h")):
-            col = 0
-            row = clamp(row, 0, len(undone) - 1)
-        elif ch in (curses.KEY_RIGHT, ord("l")):
-            col = 1
-            row = clamp(row, 0, len(done) - 1)
+        if ch == ord("j"):
+            # 新しいブロックへ（リスト先頭方向）
+            block_idx = max(block_idx - 1, 0)
+            task_row = 0
+        elif ch == ord("k"):
+            # 古いブロックへ（リスト末尾方向）
+            block_idx = min(block_idx + 1, max(0, len(blocks) - 1))
+            task_row = 0
+        elif ch == curses.KEY_DOWN:
+            if blocks:
+                task_row = min(task_row + 1, max(0, len(blocks[block_idx][1]) - 1))
+        elif ch == curses.KEY_UP:
+            task_row = max(task_row - 1, 0)
         elif ch in (10, 13):
-            target = undone if col == 0 else done
-            if row < len(target):
-                toggle_task(path, target[row][0])
-                undone, done = read_tasks(path)
-                row = 0
+            if blocks:
+                _, tasks = blocks[block_idx]
+                if task_row < len(tasks):
+                    line_idx, raw = tasks[task_row]
+                    if TASK_RE.match(raw):  # タスク行のみトグル
+                        toggle_task(path, line_idx)
+                        blocks = read_blocks(path)
+                        block_idx = clamp(block_idx, 0, max(0, len(blocks) - 1))
 
-        draw_screen(stdscr, path, undone, done, col, row, clock_only, items or None)
+        draw_screen(stdscr, path, blocks, block_idx, task_row, clock_only, items or None)
 
 def main():
     global FILTER_DAYS
@@ -369,6 +360,8 @@ def main():
                         help="軌道エフェクト（時計周囲を記号が周回）")
     parser.add_argument("--plasma", action="store_true",
                         help="プラズマ波エフェクト（背景に波紋）")
+    parser.add_argument("--walk", "-w", action="store_true",
+                        help="パリ街並みと歩く棒人間")
     args = parser.parse_args()
     FILTER_DAYS = args.days
     curses.wrapper(
@@ -380,6 +373,7 @@ def main():
         args.rain or 0,
         args.orbit,
         args.plasma,
+        args.walk,
     )
 
 if __name__ == "__main__":
