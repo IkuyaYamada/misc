@@ -464,6 +464,9 @@ def main_loop(stdscr, path, clock_only=False, particle_count=0,
                         toggle_task(path, line_idx)
                         blocks = read_blocks(path)
                         block_idx = clamp(block_idx, 0, max(0, len(blocks) - 1))
+                        # mtime を更新してポーリングによる task_row リセットを防ぐ
+                        if os.path.exists(path):
+                            last_mtime = os.path.getmtime(path)
         elif ch == ord("o"):
             if blocks:
                 _, _, _, tasks = blocks[block_idx]
